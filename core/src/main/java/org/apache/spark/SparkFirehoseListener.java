@@ -104,6 +104,12 @@ public class SparkFirehoseListener implements SparkListenerInterface {
   }
 
   @Override
+  public final void onStageExecutorMetrics(
+      SparkListenerStageExecutorMetrics executorMetrics) {
+    onEvent(executorMetrics);
+  }
+
+  @Override
   public final void onExecutorAdded(SparkListenerExecutorAdded executorAdded) {
     onEvent(executorAdded);
   }
@@ -154,6 +160,21 @@ public class SparkFirehoseListener implements SparkListenerInterface {
   @Override
   public void onSpeculativeTaskSubmitted(SparkListenerSpeculativeTaskSubmitted speculativeTask) {
     onEvent(speculativeTask);
+  }
+
+  public void onUnschedulableTaskSetAdded(
+      SparkListenerUnschedulableTaskSetAdded unschedulableTaskSetAdded) {
+    onEvent(unschedulableTaskSetAdded);
+  }
+
+  public void onUnschedulableTaskSetRemoved(
+      SparkListenerUnschedulableTaskSetRemoved unschedulableTaskSetRemoved) {
+    onEvent(unschedulableTaskSetRemoved);
+  }
+
+  @Override
+  public void onResourceProfileAdded(SparkListenerResourceProfileAdded event) {
+    onEvent(event);
   }
 
   @Override

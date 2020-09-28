@@ -125,7 +125,7 @@ public final class UnsafeInMemorySorter {
     int initialSize,
     boolean canUseRadixSort) {
     this(consumer, memoryManager, recordComparator, prefixComparator,
-      consumer.allocateArray(initialSize * 2), canUseRadixSort);
+      consumer.allocateArray(initialSize * 2L), canUseRadixSort);
   }
 
   public UnsafeInMemorySorter(
@@ -205,6 +205,10 @@ public final class UnsafeInMemorySorter {
   }
 
   public long getMemoryUsage() {
+    if (array == null) {
+      return 0L;
+    }
+
     return array.size() * 8;
   }
 
@@ -214,7 +218,9 @@ public final class UnsafeInMemorySorter {
 
   public void expandPointerArray(LongArray newArray) {
     if (newArray.size() < array.size()) {
+      // checkstyle.off: RegexpSinglelineJava
       throw new SparkOutOfMemoryError("Not enough memory to grow pointer array");
+      // checkstyle.on: RegexpSinglelineJava
     }
     Platform.copyMemory(
       array.getBaseObject(),
@@ -229,7 +235,7 @@ public final class UnsafeInMemorySorter {
 
   /**
    * Inserts a record to be sorted. Assumes that the record pointer points to a record length
-   * stored as a 4-byte integer, followed by the record's bytes.
+   * stored as a uaoSize(4 or 8) bytes integer, followed by the record's bytes.
    *
    * @param recordPointer pointer to a record in a data page, encoded by {@link TaskMemoryManager}.
    * @param keyPrefix a user-defined key prefix
@@ -324,6 +330,7 @@ public final class UnsafeInMemorySorter {
     @Override
     public long getBaseOffset() { return baseOffset; }
 
+    @Override
     public long getCurrentPageNumber() {
       return currentPageNumber;
     }
