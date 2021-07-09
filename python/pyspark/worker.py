@@ -21,7 +21,7 @@ Worker that receives input from Piped RDD.
 import os
 import sys
 import time
-from inspect import getfullargspec
+from inspect import currentframe, getframeinfo, getfullargspec
 import importlib
 # 'resource' is a Unix specific module.
 has_resource_module = True
@@ -30,6 +30,8 @@ try:
 except ImportError:
     has_resource_module = False
 import traceback
+import warnings
+import faulthandler
 
 from pyspark.accumulators import _accumulatorRegistry
 from pyspark.broadcast import Broadcast, _broadcastRegistry
@@ -44,7 +46,7 @@ from pyspark.serializers import write_with_length, write_int, read_long, read_bo
 from pyspark.sql.pandas.serializers import ArrowStreamPandasUDFSerializer, CogroupUDFSerializer
 from pyspark.sql.pandas.types import to_arrow_type
 from pyspark.sql.types import StructType
-from pyspark.util import fail_on_stopiteration
+from pyspark.util import fail_on_stopiteration, try_simplify_traceback  # type: ignore
 from pyspark import shuffle
 
 pickleSer = PickleSerializer()
@@ -59,7 +61,7 @@ def report_times(outfile, boot, init, finish):
 
 
 def add_path(path):
-    # worker can be used, so donot add path multiple times
+    # worker can be used, so do not add path multiple times
     if path not in sys.path:
         # overwrite system packages
         sys.path.insert(1, path)
@@ -387,7 +389,10 @@ def read_udfs(pickleSer, infile, eval_type):
         Helper function to extract the key and value indexes from arg_offsets for the grouped and
         cogrouped pandas udfs. See BasePandasGroupExec.resolveArgOffsets for equivalent scala code.
 
-        :param grouped_arg_offsets:  List containing the key and value indexes of columns of the
+        Parameters
+        ----------
+        grouped_arg_offsets:  list
+            List containing the key and value indexes of columns of the
             DataFrames to be passed to the udf. It consists of n repeating groups where n is the
             number of DataFrames.  Each group has the following format:
                 group[0]: length of group
@@ -459,7 +464,13 @@ def read_udfs(pickleSer, infile, eval_type):
 
 
 def main(infile, outfile):
+    faulthandler_log_path = os.environ.get("PYTHON_FAULTHANDLER_DIR", None)
     try:
+        if faulthandler_log_path:
+            faulthandler_log_path = os.path.join(faulthandler_log_path, str(os.getpid()))
+            faulthandler_log_file = open(faulthandler_log_path, "w")
+            faulthandler.enable(file=faulthandler_log_file)
+
         boot_time = time.time()
         split_index = read_int(infile)
         if split_index == -1:  # for unit tests
@@ -467,11 +478,11 @@ def main(infile, outfile):
 
         version = utf8_deserializer.loads(infile)
         if version != "%d.%d" % sys.version_info[:2]:
-            raise Exception(("Python in worker has different version %s than that in " +
-                             "driver %s, PySpark cannot run with different minor versions. " +
-                             "Please check environment variables PYSPARK_PYTHON and " +
-                             "PYSPARK_DRIVER_PYTHON are correctly set.") %
-                            ("%d.%d" % sys.version_info[:2], version))
+            raise RuntimeError(("Python in worker has different version %s than that in " +
+                                "driver %s, PySpark cannot run with different minor versions. " +
+                                "Please check environment variables PYSPARK_PYTHON and " +
+                                "PYSPARK_DRIVER_PYTHON are correctly set.") %
+                               ("%d.%d" % sys.version_info[:2], version))
 
         # read inputs only for a barrier task
         isBarrier = read_bool(infile)
@@ -497,7 +508,14 @@ def main(infile, outfile):
 
             except (resource.error, OSError, ValueError) as e:
                 # not all systems support resource limits, so warn instead of failing
-                print("WARN: Failed to set memory limit: {0}\n".format(e), file=sys.stderr)
+                lineno = getframeinfo(
+                    currentframe()).lineno + 1 if currentframe() is not None else 0
+                print(warnings.formatwarning(
+                    "Failed to set memory limit: {0}".format(e),
+                    ResourceWarning,
+                    __file__,
+                    lineno
+                ), file=sys.stderr)
 
         # initialize global state
         taskContext = None
@@ -604,25 +622,32 @@ def main(infile, outfile):
         # reuse.
         TaskContext._setTaskContext(None)
         BarrierTaskContext._setTaskContext(None)
-    except Exception:
+    except BaseException as e:
         try:
-            exc_info = traceback.format_exc()
-            if isinstance(exc_info, bytes):
-                # exc_info may contains other encoding bytes, replace the invalid bytes and convert
-                # it back to utf-8 again
-                exc_info = exc_info.decode("utf-8", "replace").encode("utf-8")
-            else:
-                exc_info = exc_info.encode("utf-8")
+            exc_info = None
+            if os.environ.get("SPARK_SIMPLIFIED_TRACEBACK", False):
+                tb = try_simplify_traceback(sys.exc_info()[-1])
+                if tb is not None:
+                    e.__cause__ = None
+                    exc_info = "".join(traceback.format_exception(type(e), e, tb))
+            if exc_info is None:
+                exc_info = traceback.format_exc()
+
             write_int(SpecialLengths.PYTHON_EXCEPTION_THROWN, outfile)
-            write_with_length(exc_info, outfile)
+            write_with_length(exc_info.encode("utf-8"), outfile)
         except IOError:
             # JVM close the socket
             pass
-        except Exception:
+        except BaseException:
             # Write the error to stderr if it happened while serializing
             print("PySpark worker failed with exception:", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)
         sys.exit(-1)
+    finally:
+        if faulthandler_log_path:
+            faulthandler.disable()
+            faulthandler_log_file.close()
+            os.remove(faulthandler_log_path)
     finish_time = time.time()
     report_times(outfile, boot_time, init_time, finish_time)
     write_long(shuffle.MemoryBytesSpilled, outfile)
@@ -648,4 +673,7 @@ if __name__ == '__main__':
     java_port = int(os.environ["PYTHON_WORKER_FACTORY_PORT"])
     auth_secret = os.environ["PYTHON_WORKER_FACTORY_SECRET"]
     (sock_file, _) = local_connect_and_auth(java_port, auth_secret)
+    # TODO: Remove thw following two lines and use `Process.pid()` when we drop JDK 8.
+    write_int(os.getpid(), sock_file)
+    sock_file.flush()
     main(sock_file, sock_file)

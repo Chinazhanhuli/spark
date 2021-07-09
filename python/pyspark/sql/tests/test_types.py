@@ -27,6 +27,7 @@ import unittest
 from pyspark.sql import Row
 from pyspark.sql.functions import col
 from pyspark.sql.udf import UserDefinedFunction
+from pyspark.sql.utils import AnalysisException
 from pyspark.sql.types import ByteType, ShortType, IntegerType, FloatType, DateType, \
     TimestampType, MapType, StringType, StructType, StructField, ArrayType, DoubleType, LongType, \
     DecimalType, BinaryType, BooleanType, NullType
@@ -179,7 +180,7 @@ class TypesTests(ReusedSQLTestCase):
         self.assertEqual(df.columns, ['col1', '_2'])
 
     def test_infer_schema_fails(self):
-        with self.assertRaisesRegexp(TypeError, 'field a'):
+        with self.assertRaisesRegex(TypeError, 'field a'):
             self.spark.createDataFrame(self.spark.sparkContext.parallelize([[1, 1], ["x", 1]]),
                                        schema=["a", "b"], samplingRatio=0.99)
 
@@ -202,6 +203,21 @@ class TypesTests(ReusedSQLTestCase):
                                    CustomRow(field1=3, field2="row3")])
         df = self.spark.createDataFrame(rdd)
         self.assertEqual(Row(field1=1, field2=u'row1'), df.first())
+
+    def test_infer_nested_dict_as_struct(self):
+        # SPARK-35929: Test inferring nested dict as a struct type.
+        NestedRow = Row("f1", "f2")
+
+        with self.sql_conf({"spark.sql.pyspark.inferNestedDictAsStruct.enabled": True}):
+            data = [NestedRow([{"payment": 200.5, "name": "A"}], [1, 2]),
+                    NestedRow([{"payment": 100.5, "name": "B"}], [2, 3])]
+
+            nestedRdd = self.sc.parallelize(data)
+            df = self.spark.createDataFrame(nestedRdd)
+            self.assertEqual(Row(f1=[Row(payment=200.5, name='A')], f2=[1, 2]), df.first())
+
+            df = self.spark.createDataFrame(data)
+            self.assertEqual(Row(f1=[Row(payment=200.5, name='A')], f2=[1, 2]), df.first())
 
     def test_create_dataframe_from_dict_respects_schema(self):
         df = self.spark.createDataFrame([{'a': 1}], ["b"])
@@ -441,6 +457,14 @@ class TypesTests(ReusedSQLTestCase):
         result = df.select(col('point').cast('string'), col('pypoint').cast('string')).head()
         self.assertEqual(result, Row(point=u'(1.0, 2.0)', pypoint=u'[3.0, 4.0]'))
 
+    def test_cast_to_udt_with_udt(self):
+        from pyspark.sql.functions import col
+        row = Row(point=ExamplePoint(1.0, 2.0), python_only_point=PythonOnlyPoint(1.0, 2.0))
+        df = self.spark.createDataFrame([row])
+        self.assertRaises(AnalysisException, lambda: df.select(col("point").cast(PythonOnlyUDT())))
+        self.assertRaises(AnalysisException,
+                          lambda: df.select(col("python_only_point").cast(ExamplePointUDT())))
+
     def test_struct_type(self):
         struct1 = StructType().add("f1", StringType(), True).add("f2", StringType(), True, None)
         struct2 = StructType([StructField("f1", StringType(), True),
@@ -569,18 +593,18 @@ class TypesTests(ReusedSQLTestCase):
             ArrayType(LongType()),
             ArrayType(LongType())
         ), ArrayType(LongType()))
-        with self.assertRaisesRegexp(TypeError, 'element in array'):
+        with self.assertRaisesRegex(TypeError, 'element in array'):
             _merge_type(ArrayType(LongType()), ArrayType(DoubleType()))
 
         self.assertEqual(_merge_type(
             MapType(StringType(), LongType()),
             MapType(StringType(), LongType())
         ), MapType(StringType(), LongType()))
-        with self.assertRaisesRegexp(TypeError, 'key of map'):
+        with self.assertRaisesRegex(TypeError, 'key of map'):
             _merge_type(
                 MapType(StringType(), LongType()),
                 MapType(DoubleType(), LongType()))
-        with self.assertRaisesRegexp(TypeError, 'value of map'):
+        with self.assertRaisesRegex(TypeError, 'value of map'):
             _merge_type(
                 MapType(StringType(), LongType()),
                 MapType(StringType(), DoubleType()))
@@ -589,7 +613,7 @@ class TypesTests(ReusedSQLTestCase):
             StructType([StructField("f1", LongType()), StructField("f2", StringType())]),
             StructType([StructField("f1", LongType()), StructField("f2", StringType())])
         ), StructType([StructField("f1", LongType()), StructField("f2", StringType())]))
-        with self.assertRaisesRegexp(TypeError, 'field f1'):
+        with self.assertRaisesRegex(TypeError, 'field f1'):
             _merge_type(
                 StructType([StructField("f1", LongType()), StructField("f2", StringType())]),
                 StructType([StructField("f1", DoubleType()), StructField("f2", StringType())]))
@@ -598,7 +622,7 @@ class TypesTests(ReusedSQLTestCase):
             StructType([StructField("f1", StructType([StructField("f2", LongType())]))]),
             StructType([StructField("f1", StructType([StructField("f2", LongType())]))])
         ), StructType([StructField("f1", StructType([StructField("f2", LongType())]))]))
-        with self.assertRaisesRegexp(TypeError, 'field f2 in field f1'):
+        with self.assertRaisesRegex(TypeError, 'field f2 in field f1'):
             _merge_type(
                 StructType([StructField("f1", StructType([StructField("f2", LongType())]))]),
                 StructType([StructField("f1", StructType([StructField("f2", StringType())]))]))
@@ -607,7 +631,7 @@ class TypesTests(ReusedSQLTestCase):
             StructType([StructField("f1", ArrayType(LongType())), StructField("f2", StringType())]),
             StructType([StructField("f1", ArrayType(LongType())), StructField("f2", StringType())])
         ), StructType([StructField("f1", ArrayType(LongType())), StructField("f2", StringType())]))
-        with self.assertRaisesRegexp(TypeError, 'element in array field f1'):
+        with self.assertRaisesRegex(TypeError, 'element in array field f1'):
             _merge_type(
                 StructType([
                     StructField("f1", ArrayType(LongType())),
@@ -626,7 +650,7 @@ class TypesTests(ReusedSQLTestCase):
         ), StructType([
             StructField("f1", MapType(StringType(), LongType())),
             StructField("f2", StringType())]))
-        with self.assertRaisesRegexp(TypeError, 'value of map field f1'):
+        with self.assertRaisesRegex(TypeError, 'value of map field f1'):
             _merge_type(
                 StructType([
                     StructField("f1", MapType(StringType(), LongType())),
@@ -639,7 +663,7 @@ class TypesTests(ReusedSQLTestCase):
             StructType([StructField("f1", ArrayType(MapType(StringType(), LongType())))]),
             StructType([StructField("f1", ArrayType(MapType(StringType(), LongType())))])
         ), StructType([StructField("f1", ArrayType(MapType(StringType(), LongType())))]))
-        with self.assertRaisesRegexp(TypeError, 'key of map element in array field f1'):
+        with self.assertRaisesRegex(TypeError, 'key of map element in array field f1'):
             _merge_type(
                 StructType([StructField("f1", ArrayType(MapType(StringType(), LongType())))]),
                 StructType([StructField("f1", ArrayType(MapType(DoubleType(), LongType())))])
@@ -725,7 +749,7 @@ class TypesTests(ReusedSQLTestCase):
         unsupported_types = all_types - set(supported_types)
         # test unsupported types
         for t in unsupported_types:
-            with self.assertRaisesRegexp(TypeError, "infer the type of the field myarray"):
+            with self.assertRaisesRegex(TypeError, "infer the type of the field myarray"):
                 a = array.array(t)
                 self.spark.createDataFrame([Row(myarray=a)]).collect()
 
@@ -780,13 +804,13 @@ class DataTypeTests(unittest.TestCase):
 class DataTypeVerificationTests(unittest.TestCase):
 
     def test_verify_type_exception_msg(self):
-        self.assertRaisesRegexp(
+        self.assertRaisesRegex(
             ValueError,
             "test_name",
             lambda: _make_type_verifier(StringType(), nullable=False, name="test_name")(None))
 
         schema = StructType([StructField('a', StructType([StructField('b', IntegerType())]))])
-        self.assertRaisesRegexp(
+        self.assertRaisesRegex(
             TypeError,
             "field b in field a",
             lambda: _make_type_verifier(schema)([["data"]]))

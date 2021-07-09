@@ -23,7 +23,6 @@ import java.util.{Locale, MissingFormatArgumentException}
 
 import scala.util.control.NonFatal
 
-import org.apache.commons.io.FileUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
 
 import org.apache.spark.SparkException
@@ -32,19 +31,34 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
 import org.apache.spark.sql.catalyst.util.fileToString
 import org.apache.spark.sql.execution.HiveResult.{getTimeFormatters, toHiveString, TimeFormatters}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.SQLConf.TimestampTypes
 import org.apache.spark.sql.types._
 
+// scalastyle:off line.size.limit
 /**
  * Re-run all the tests in SQLQueryTestSuite via Thrift Server.
  *
+ * Each case is loaded from a file in "spark/sql/core/src/test/resources/sql-tests/inputs".
+ * Each case has a golden result file in "spark/sql/core/src/test/resources/sql-tests/results".
+ *
  * To run the entire test suite:
  * {{{
- *   build/sbt "hive-thriftserver/test-only *ThriftServerQueryTestSuite" -Phive-thriftserver
+ *   build/sbt -Phive-thriftserver "hive-thriftserver/testOnly *ThriftServerQueryTestSuite"
+ * }}}
+ *
+ * To run a single test file upon change:
+ * {{{
+ *   build/sbt -Phive-thriftserver "hive-thriftserver/testOnly *ThriftServerQueryTestSuite -- -z inline-table.sql"
  * }}}
  *
  * This test suite won't generate golden files. To re-generate golden files for entire suite, run:
  * {{{
- *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/test-only *SQLQueryTestSuite"
+ *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/testOnly *SQLQueryTestSuite"
+ * }}}
+ *
+ * To re-generate golden file for a single test, run:
+ * {{{
+ *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/testOnly *SQLQueryTestSuite -- -z describe.sql"
  * }}}
  *
  * TODO:
@@ -52,6 +66,7 @@ import org.apache.spark.sql.types._
  *   2. Support DESC command.
  *   3. Support SHOW command.
  */
+// scalastyle:on line.size.limit
 class ThriftServerQueryTestSuite extends SQLQueryTestSuite with SharedThriftServer {
 
 
@@ -93,8 +108,14 @@ class ThriftServerQueryTestSuite extends SQLQueryTestSuite with SharedThriftServ
       }
 
       testCase match {
-        case _: PgSQLTest | _: AnsiTest =>
+        case _: PgSQLTest =>
           statement.execute(s"SET ${SQLConf.ANSI_ENABLED.key} = true")
+          statement.execute(s"SET ${SQLConf.LEGACY_INTERVAL_ENABLED.key} = true")
+        case _: AnsiTest =>
+          statement.execute(s"SET ${SQLConf.ANSI_ENABLED.key} = true")
+        case _: TimestampNTZTest =>
+          statement.execute(s"SET ${SQLConf.TIMESTAMP_TYPE.key} = " +
+            s"${TimestampTypes.TIMESTAMP_NTZ.toString}")
         case _ =>
           statement.execute(s"SET ${SQLConf.ANSI_ENABLED.key} = false")
       }
@@ -227,6 +248,8 @@ class ThriftServerQueryTestSuite extends SQLQueryTestSuite with SharedThriftServ
         PgSQLTestCase(testCaseName, absPath, resultFile) :: Nil
       } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}ansi")) {
         AnsiTestCase(testCaseName, absPath, resultFile) :: Nil
+      } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}timestampNTZ")) {
+        TimestampNTZTestCase(testCaseName, absPath, resultFile) :: Nil
       } else {
         RegularTestCase(testCaseName, absPath, resultFile) :: Nil
       }
